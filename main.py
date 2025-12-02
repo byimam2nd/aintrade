@@ -1,46 +1,84 @@
 
+import asyncio
 import logging
-import time
-import threading
+import time 
 
-# Import the main functions from each agent
-from agents import kline_streaming_agent
-from agents import Teknikal_Analisys_Agent
+from core.orchestrator import AgentOrchestrator
+from agents.exchangeinfo_agent import ExchangeInfoAgent
+from agents.kline_streaming_agent import KlineStreamingAgent
+from agents.indicator_agent import IndicatorAgent
+from agents.signal_agent import SignalAgent
 
-# --- Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('LiveOrchestrator')
 
-def run_live_phase():
-    """Runs the continuous live trading agents."""
-    logger.info("====== STARTING LIVE TRADING PHASE ======")
+logger = logging.getLogger('MainOrchestrator')
+
+async def main_orchestrator():
+    logger.info("====== Initializing and Orchestrating Agents ======")
+
+    orchestrator = AgentOrchestrator(config={"live_mode": True}) # Example config
+
+    # Initialize and register agents
+    exchange_info_agent = ExchangeInfoAgent("ExchangeInfoAgent")
+    kline_streaming_agent = KlineStreamingAgent("KlineStreamingAgent")
+    indicator_agent = IndicatorAgent("IndicatorAgent")
+    signal_agent = SignalAgent("SignalAgent")
+
+    orchestrator.register_agent(exchange_info_agent)
+    orchestrator.register_agent(kline_streaming_agent)
+    orchestrator.register_agent(indicator_agent)
+    orchestrator.register_agent(signal_agent)
+
+    # --- Initial Setup Phase ---
+    logger.info("--- Running ExchangeInfo Agent (once) ---")
+    await orchestrator.execute_workflow([
+        {"agent_id": "ExchangeInfoAgent", "input_data": None}
+    ])
+    logger.info("ExchangeInfo Agent finished initial run.")
+
+    # --- Live Phase ---
+    logger.info("--- Starting Real-time K-line Streaming Agent (in background task) ---")
+    kline_task = asyncio.create_task(kline_streaming_agent.process())
     
-    # 1. Run the kline streaming agent in a separate thread
-    logger.info("--- Starting Real-time K-line Streaming Agent (in background) ---")
-    kline_streamer_thread = threading.Thread(target=kline_streaming_agent.main, name="KlineStreamer")
-    kline_streamer_thread.daemon = True
-    kline_streamer_thread.start()
-    
-    # Give the streamer a moment to connect and receive initial data
     logger.info("Waiting 10 seconds for K-line streamer to establish connection...")
-    time.sleep(10)
+    await asyncio.sleep(10)
     
-    # 2. Run the analysis agent in a continuous loop
-    logger.info("--- Starting continuous analysis loop ---")
+    logger.info("--- Starting continuous Analysis and Signal Generation loop ---")
+    analysis_interval_seconds = 60 # Run analysis every 60 seconds, or configurable
     while True:
         try:
-            Teknikal_Analisys_Agent.run_analysis_agent()
-            logger.debug("Analysis cycle complete.")
+            # 1. Run Indicator Agent
+            indicator_results = await orchestrator.execute_workflow([
+                {"agent_id": "IndicatorAgent", "input_data": None}
+            ])
+            
+            # Extract data from indicator results to pass to signal agent
+            # Assuming indicator_results will have a structure like {"IndicatorAgent": {"status": "success", "data": {symbols_data}}}
+            enriched_data = indicator_results.get("IndicatorAgent", {}).get("data")
+
+            if enriched_data:
+                # 2. Run Signal Agent
+                await orchestrator.execute_workflow([
+                    {"agent_id": "SignalAgent", "input_data": enriched_data}
+                ])
+                logger.debug(f"Analysis and Signal Generation cycle complete. Waiting {analysis_interval_seconds} seconds.")
+            else:
+                logger.warning("No enriched data from Indicator Agent. Skipping Signal Agent run.")
+
         except Exception as e:
-            logger.error(f"An error occurred during the analysis loop: {e}", exc_info=True)
+            logger.error(f"An error occurred during the analysis and signal generation loop: {e}", exc_info=True)
             logger.info("Attempting to continue after 10 seconds...")
-            time.sleep(10) # Small sleep to prevent tight looping on persistent errors
+            await asyncio.sleep(10)
+
+        await asyncio.sleep(analysis_interval_seconds)
 
 if __name__ == '__main__':
     try:
-        run_live_phase()
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        asyncio.run(main_orchestrator())
     except KeyboardInterrupt:
-        logger.info("Live trading stopped by user. Exiting.")
+        logger.info("Orchestration stopped by user. Exiting.")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred in the main orchestrator: {e}", exc_info=True)
